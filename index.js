@@ -1,9 +1,12 @@
-// Chat Bubbles v0.3.0
+// Chat Bubbles v0.4.0
 // - Bot replies are shown as chat bubbles (one line = one bubble); the thinking/planning block is hidden
 // - Bubble count is randomised every turn (so the AI stays dynamic instead of locking onto one number)
 // - Chat-app UI: full-width header, bot left / you right, typing indicator, app-style composer
 // - Broken replies (only symbols / thinking only) are detected -> retry chip + one automatic retry
 // - Token saver: thinking blocks of OLD bot messages are not re-sent in the prompt
+// - v0.4: human-like typing indicator (types / goes quiet / types again, pauses grow the longer the AI takes)
+// - v0.4: new default prompt - bubble count is a soft hint (no more sentences cut in half to hit a number),
+//         plus rules against the 'assistant voice' (closing offers, recaps, emoji/politeness on every line)
 // Stored chat text is never modified; rendering is display-only (plus the outgoing prompt copy).
 
 (() => {
@@ -11,13 +14,29 @@
 
     const MODULE = 'chat_bubbles';
     const PROMPT_KEY = 'chat_bubbles_prompt';
-    const VER = 3;
+    const VER = 4;
 
-    const DEFAULT_PROMPT =
+    // v3 default, kept only so an untouched old default can be upgraded automatically
+    const OLD_PROMPT_V3 =
         '[Chat app mode. Reply = the character\'s sent text messages only, one per line, one thought each, ' +
         'in the chat\'s language. This turn: exactly {{n}} message(s); {{style}}. ' +
         'No narration, actions, *asterisks* or quotes. Casual phone-typing style, emoji sparingly. ' +
         'Keep any thinking/planning block as already instructed; after it write only the chat lines.]';
+
+    const DEFAULT_PROMPT =
+        '[Chat app mode. Reply = only the text messages the character actually sends, one per line, in the chat\'s language. ' +
+        'Lean toward about {{n}} message(s) this turn ({{style}}), but the content decides: fewer is fine, ' +
+        'and never cut one sentence across lines just to hit a number. Start a new line only where a real person would hit send. ' +
+        'No narration, *actions* or quotes. Do not describe the room or what is physically happening through speech; ' +
+        'if the character would not say it out loud, leave it out. ' +
+        'Sound like this person texting, not like a service desk: react to what was just said before anything else; ' +
+        'let the character want something or hold a small bias; ' +
+        'no closing offers ("let me know", "feel free"), no recap of what the user just said, no sign-off on every line; ' +
+        'politeness particles only where this character really uses them; emoji rare, never a habit at line ends; ' +
+        'a short, odd or unfinished reply is fine. ' +
+        'If you have a thinking/planning step, keep it as already instructed and add one check to it: ' +
+        'what does the character want from this exchange, and what would a helpful assistant say here? Do not say that. ' +
+        'After the thinking, write only the chat lines.]';
 
     const STYLES = [
         'short punchy bursts',
@@ -36,6 +55,7 @@
         stripNarration: true,
         trimHistory: true,
         autoRetry: true,
+        humanTyping: true,
         minBubbles: 1,
         maxBubbles: 6,
         cotTags: DEFAULT_TAGS,
@@ -50,10 +70,14 @@
         if (!extensionSettings[MODULE]) extensionSettings[MODULE] = {};
         const s = extensionSettings[MODULE];
         if (s.ver !== VER) {
-            // migrate: new prompt + new meaning of min/max (random range)
-            s.prompt = DEFAULT_PROMPT;
-            s.minBubbles = defaults.minBubbles;
-            s.maxBubbles = defaults.maxBubbles;
+            const from = Number(s.ver) || 0;
+            if (from < 3) {
+                // v3 changed the meaning of min/max (random range)
+                s.minBubbles = defaults.minBubbles;
+                s.maxBubbles = defaults.maxBubbles;
+            }
+            // upgrade the prompt unless the person has written their own
+            if (from < 3 || s.prompt === undefined || s.prompt === OLD_PROMPT_V3) s.prompt = DEFAULT_PROMPT;
             delete s.animate;
             s.ver = VER;
         }
@@ -70,6 +94,7 @@
     let generating = false;
     let genStart = 0;
     let animUntil = 0;
+    let liveText = false; // real words are already streaming in (so: no fake pauses)
     const roll = { n: 3, style: STYLES[0] };
     const retries = new Map();
 
@@ -284,6 +309,7 @@
                 addTime(wrap, mes);
             }
             el.dataset.cbCount = String(bubbles.length);
+            if (isLast && generating && countWords(bubbles) > 0) liveText = true;
         } else if (generating && isLast) {
             wrap.appendChild(typingBubble()); // still thinking -> show typing dots
             el.dataset.cbCount = '0';
@@ -473,6 +499,72 @@
         }
     }
 
+    // ---------- human-like typing: types -> goes quiet -> types again ----------
+    // While the AI is still working (thinking block, slow API) the indicator does not just blink steadily:
+    // it comes and goes like someone composing, deleting and rethinking. The longer the wait, the longer the quiet gaps.
+    // Once real words start streaming in, it stays on steadily.
+
+    const TYPING = {
+        startDelay: [500, 1400],  // ms of "read, not typing yet" before the first typing
+        burst: [1300, 3600],      // ms the indicator stays up
+        pause: [700, 2200],       // ms it stays gone in between
+        growth: 25,               // seconds of waiting after which pauses are ~2x longer
+        maxGrowth: 2.6,           // ceiling for that stretch
+    };
+    const typer = { on: false, show: false, t0: 0, timer: 0 };
+    const rand = ([a, b]) => a + Math.random() * (b - a);
+
+    function paintTyping(typing, paused) {
+        // paused -> CSS fades the dots out (space stays reserved, so nothing jumps around)
+        document.body.classList.toggle('cb-tpause', paused);
+        if (!header) return;
+        header.classList.toggle('cb-is-typing', typing);
+        const st = header.querySelector('.cb-hstatus span');
+        if (st) st.textContent = typing ? 'กำลังพิมพ์…' : 'ออนไลน์';
+    }
+
+    function typerStep() {
+        clearTimeout(typer.timer);
+        if (!typer.on) return;
+        if (liveText) {
+            typer.show = true;
+            paintTyping(true, false);
+            typer.timer = setTimeout(typerStep, 400);
+            return;
+        }
+        typer.show = !typer.show;
+        paintTyping(typer.show, !typer.show);
+        const waited = (Date.now() - typer.t0) / 1000;
+        const stretch = Math.min(TYPING.maxGrowth, 1 + waited / TYPING.growth);
+        const ms = typer.show ? rand(TYPING.burst) : rand(TYPING.pause) * stretch;
+        typer.timer = setTimeout(typerStep, ms);
+    }
+
+    function typerStart() {
+        if (typer.on) return;
+        typer.on = true;
+        typer.show = false;
+        typer.t0 = Date.now();
+        paintTyping(false, true);
+        typer.timer = setTimeout(typerStep, rand(TYPING.startDelay));
+    }
+
+    function typerStop() {
+        typer.on = false;
+        typer.show = false;
+        clearTimeout(typer.timer);
+    }
+
+    function syncTyper() {
+        const s = getSettings();
+        if (generating && s.enabled && s.humanTyping) {
+            typerStart(); // no-op when already running
+            return;
+        }
+        typerStop();
+        paintTyping(generating, false); // classic: steady while generating, off otherwise
+    }
+
     function updateTyping() {
         const chat = document.getElementById('chat');
         if (!chat) return;
@@ -490,11 +582,7 @@
 
         const on = s.enabled && s.appUI;
 
-        if (header) {
-            header.classList.toggle('cb-is-typing', generating);
-            const st = header.querySelector('.cb-hstatus span');
-            if (st) st.textContent = generating ? 'กำลังพิมพ์…' : 'ออนไลน์';
-        }
+        syncTyper();
 
         let last = chat.lastElementChild;
         while (last && !last.classList.contains('mes')) last = last.previousElementSibling;
@@ -566,6 +654,7 @@
       <label class="checkbox_label"><input type="checkbox" id="cb_appui"><span>หน้าตาแอปแชท (ซ้าย/ขวา + แถบชื่อ)</span></label>
       <label class="checkbox_label"><input type="checkbox" id="cb_trim"><span>ประหยัดโทเค่น: ไม่ส่งส่วนคิดของข้อความเก่า</span></label>
       <label class="checkbox_label"><input type="checkbox" id="cb_retry"><span>ตอบไม่ครบ → ลองใหม่อัตโนมัติ 1 ครั้ง</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="cb_human"><span>กำลังพิมพ์แบบพิมพ์ๆ หยุดๆ (ยิ่ง AI คิดนาน ยิ่งหยุดนาน)</span></label>
       <div class="cb-row">
         <span>สีบับเบิ้ลของฉัน</span>
         <input type="color" id="cb_color">
@@ -619,6 +708,12 @@
         $('#cb_retry').prop('checked', s.autoRetry).on('change', function () {
             s.autoRetry = this.checked;
             save();
+        });
+
+        $('#cb_human').prop('checked', s.humanTyping).on('change', function () {
+            s.humanTyping = this.checked;
+            save();
+            syncTyper();
         });
 
         $('#cb_color').val(s.meColor).on('input', function () {
@@ -706,6 +801,7 @@
         on('GENERATION_STARTED', (type, params, dryRun) => {
             if (dryRun || params?.quiet_prompt) return;
             generating = true;
+            liveText = false;
             genStart = Date.now();
             animUntil = Infinity;
             rollTurn(); // new random bubble count for this reply
@@ -716,6 +812,7 @@
         const ended = (stopped) => {
             const was = generating;
             generating = false;
+            liveText = false;
             animUntil = Date.now() + 1500;
             rescan();
             updateTyping();
