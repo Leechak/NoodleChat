@@ -1,21 +1,30 @@
-// Chat Bubbles v0.2.0
+// Chat Bubbles v0.3.0
 // - Bot replies are shown as chat bubbles (one line = one bubble); the thinking/planning block is hidden
-// - Chat-app UI: header with name/status, bot on the left, you on the right, typing indicator
+// - Bubble count is randomised every turn (so the AI stays dynamic instead of locking onto one number)
+// - Chat-app UI: full-width header, bot left / you right, typing indicator, app-style composer
+// - Broken replies (only symbols / thinking only) are detected -> retry chip + one automatic retry
 // - Token saver: thinking blocks of OLD bot messages are not re-sent in the prompt
-// Stored chat text is never modified; everything is display-only (plus the outgoing prompt copy).
+// Stored chat text is never modified; rendering is display-only (plus the outgoing prompt copy).
 
 (() => {
     'use strict';
 
     const MODULE = 'chat_bubbles';
     const PROMPT_KEY = 'chat_bubbles_prompt';
-    const VER = 2;
+    const VER = 3;
 
     const DEFAULT_PROMPT =
-        '[Chat app mode. Visible reply = the character\'s sent text messages only: {{min}}-{{max}} short messages, ' +
-        'one per line, one thought each. No narration, actions, *asterisks* or quotes. Casual phone-typing style, ' +
-        'emoji sparingly. Same language as the chat. Keep any thinking/planning block exactly as your instructions ' +
-        'define it; only the part after it must be chat lines.]';
+        '[Chat app mode. Reply = the character\'s sent text messages only, one per line, one thought each, ' +
+        'in the chat\'s language. This turn: exactly {{n}} message(s); {{style}}. ' +
+        'No narration, actions, *asterisks* or quotes. Casual phone-typing style, emoji sparingly. ' +
+        'Keep any thinking/planning block as already instructed; after it write only the chat lines.]';
+
+    const STYLES = [
+        'short punchy bursts',
+        'mix of 1-3 word messages and fuller sentences',
+        'one longer message, the rest short',
+        'relaxed mid-length messages',
+    ];
 
     const DEFAULT_TAGS = 'think,thinking,thought,reasoning,plan,planning,analysis,scratchpad,cot';
 
@@ -26,8 +35,9 @@
         meColor: '#3b82f6',
         stripNarration: true,
         trimHistory: true,
-        minBubbles: 2,
-        maxBubbles: 5,
+        autoRetry: true,
+        minBubbles: 1,
+        maxBubbles: 6,
         cotTags: DEFAULT_TAGS,
         replyTag: '',
         prompt: DEFAULT_PROMPT,
@@ -40,8 +50,10 @@
         if (!extensionSettings[MODULE]) extensionSettings[MODULE] = {};
         const s = extensionSettings[MODULE];
         if (s.ver !== VER) {
-            // migrate from v0.1: new shorter prompt
+            // migrate: new prompt + new meaning of min/max (random range)
             s.prompt = DEFAULT_PROMPT;
+            s.minBubbles = defaults.minBubbles;
+            s.maxBubbles = defaults.maxBubbles;
             delete s.animate;
             s.ver = VER;
         }
@@ -58,8 +70,25 @@
     let generating = false;
     let genStart = 0;
     let animUntil = 0;
+    const roll = { n: 3, style: STYLES[0] };
+    const retries = new Map();
 
-    // ---------- prompt injection ----------
+    // ---------- prompt injection (random bubble count per turn) ----------
+
+    function rollTurn() {
+        const s = getSettings();
+        const lo = Math.max(1, s.minBubbles);
+        const hi = Math.max(lo, s.maxBubbles);
+        let n = lo;
+        if (hi > lo) {
+            let tries = 0;
+            do {
+                n = lo + Math.floor(Math.random() * (hi - lo + 1));
+            } while (n === roll.n && ++tries < 8);
+        }
+        roll.n = n;
+        roll.style = STYLES[Math.floor(Math.random() * STYLES.length)];
+    }
 
     function applyPrompt() {
         const c = ctx();
@@ -67,7 +96,11 @@
         const types = c.extension_prompt_types ?? { IN_PROMPT: 0, IN_CHAT: 1 };
         const roles = c.extension_prompt_roles ?? { SYSTEM: 0 };
         const text = s.enabled
-            ? s.prompt.replaceAll('{{min}}', String(s.minBubbles)).replaceAll('{{max}}', String(s.maxBubbles))
+            ? s.prompt
+                .replaceAll('{{n}}', String(roll.n))
+                .replaceAll('{{style}}', roll.style)
+                .replaceAll('{{min}}', String(s.minBubbles))
+                .replaceAll('{{max}}', String(s.maxBubbles))
             : '';
         // depth 0 = right after the latest message
         c.setExtensionPrompt(PROMPT_KEY, text, types.IN_CHAT, 0, false, roles.SYSTEM);
@@ -113,6 +146,9 @@
 
     // ---------- text -> bubbles ----------
 
+    const HAS_WORD = /[\p{L}\p{N}]/u;
+    const countWords = (arr) => (arr.join('').match(/[\p{L}\p{N}]/gu) || []).length;
+
     function escapeHtml(str) {
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -123,21 +159,33 @@
             .replace(/(^|[^*])\*(?!\s)([^*]+?)\*(?!\*)/g, '$1<em>$2</em>');
     }
 
-    function toBubbles(raw, s) {
-        let text = pickReply(stripCot(raw, s), s);
-        if (generating) text = text.replace(/(?:<|\[)\/?[A-Za-z]*$/, ''); // half-typed tag while streaming
-
+    function splitLines(text, s, asSpeech) {
         const out = [];
         for (let line of text.split(/\r?\n|\|\|\|/)) {
-            if (s.stripNarration) {
+            const orig = line;
+            if (asSpeech) {
+                line = line.replace(/\*+/g, ''); // treat *text* as ordinary speech
+            } else if (s.stripNarration) {
                 line = line.replace(/\*[^*\n]*\*/g, '');
                 if ((line.match(/\*/g) || []).length % 2 === 1) {
                     line = line.slice(0, line.lastIndexOf('*')); // unclosed narration
                 }
+                // leftovers of a narration line (e.g. only an emoji) are dropped
+                if (line !== orig && !HAS_WORD.test(line) && HAS_WORD.test(orig)) continue;
             }
             line = line.trim().replace(/^["“”「『]+|["“”」』]+$/g, '').trim();
             if (line) out.push(line);
         }
+        return out;
+    }
+
+    function toBubbles(raw, s) {
+        let text = pickReply(stripCot(raw, s), s);
+        if (generating) text = text.replace(/(?:<|\[)\/?[A-Za-z]*$/, ''); // half-typed tag while streaming
+
+        let out = splitLines(text, s, false);
+        // everything was inside *...* -> the model used asterisks for its speech: keep it
+        if (!out.length && s.stripNarration && !generating) out = splitLines(text, s, true);
         return out;
     }
 
@@ -148,6 +196,14 @@
         d.className = 'cb-bubble cb-typing';
         d.innerHTML = '<i></i><i></i><i></i>';
         return d;
+    }
+
+    function retryChip(label) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'cb-retry';
+        b.innerHTML = '<i class="fa-solid fa-rotate-right"></i> ' + label;
+        return b;
     }
 
     function addTime(wrap, mes) {
@@ -218,14 +274,26 @@
                 d.innerHTML = inlineFormat(b);
                 if (animate && i >= start) {
                     d.classList.add('cb-new');
-                    d.style.animationDelay = `${(i - start) * 150}ms`;
+                    d.style.animationDelay = `${(i - start) * 180}ms`;
                 }
                 wrap.appendChild(d);
             });
-            if (s.appUI && !generating) addTime(wrap, mes);
+            if (isLast && !generating && countWords(bubbles) < 2) {
+                wrap.appendChild(retryChip('ตอบไม่ครบ ลองใหม่'));
+            } else if (s.appUI && !generating) {
+                addTime(wrap, mes);
+            }
             el.dataset.cbCount = String(bubbles.length);
         } else if (generating && isLast) {
             wrap.appendChild(typingBubble()); // still thinking -> show typing dots
+            el.dataset.cbCount = '0';
+        } else if (isLast && !generating && !stripCot(msg.mes, s).trim()) {
+            // finished, but there is only a thinking block (or nothing)
+            const note = document.createElement('div');
+            note.className = 'cb-bubble cb-note';
+            note.textContent = 'ยังไม่มีข้อความตอบ';
+            wrap.appendChild(note);
+            wrap.appendChild(retryChip('ลองใหม่'));
             el.dataset.cbCount = '0';
         } else {
             // nothing usable: fall back to ST's own rendering
@@ -250,12 +318,29 @@
             const list = [...pending];
             pending.clear();
             list.forEach(renderMes);
+            // retry chips only make sense on the latest message
+            document.querySelectorAll('#chat .mes:not(.last_mes) .cb-retry').forEach((x) => x.remove());
             if (generating) updateTyping();
         });
     }
 
     function rescan() {
         document.querySelectorAll('#chat .mes').forEach(queue);
+    }
+
+    // regenerate the latest bot message (as a new swipe if possible)
+    function regenerate() {
+        const sw = document.querySelector('#chat .mes.last_mes .swipe_right');
+        if (sw) {
+            sw.click();
+            return true;
+        }
+        const opt = document.getElementById('option_regenerate');
+        if (opt) {
+            opt.click();
+            return true;
+        }
+        return false;
     }
 
     function startObserver() {
@@ -279,8 +364,14 @@
         });
         obs.observe(chat, { childList: true, subtree: true });
 
-        // tap a message to show its tools (edit/delete/...) on touch screens
         chat.addEventListener('click', (e) => {
+            const rb = e.target.closest('.cb-retry');
+            if (rb) {
+                e.preventDefault();
+                regenerate();
+                return;
+            }
+            // tap a message to show its tools (edit/delete/...) on touch screens
             const s = getSettings();
             if (!s.enabled || !s.appUI) return;
             if (e.target.closest('.mes_buttons, .mes_edit_buttons, .swipe_left, .swipe_right, a, button, input, textarea')) return;
@@ -298,6 +389,33 @@
         else toastr.info('รีเฟรชหน้าเว็บเพื่อกลับไปแสดงผลแบบเดิม');
     }
 
+    // ---------- broken-reply detection ----------
+
+    function isEmptyReply(msg, s) {
+        return countWords(toBubbles(msg.mes, s)) < 2;
+    }
+
+    function checkReply() {
+        const s = getSettings();
+        if (!s.enabled || !s.autoRetry || generating) return;
+        const c = ctx();
+        const chat = c.chat;
+        if (!chat?.length) return;
+        const idx = chat.length - 1;
+        const msg = chat[idx];
+        if (!msg || msg.is_user || msg.is_system) return;
+        if (!isEmptyReply(msg, s)) return;
+
+        let u = idx - 1;
+        while (u >= 0 && !chat[u].is_user) u--;
+        const key = String(c.chatId ?? '') + ':' + u;
+        const n = retries.get(key) || 0;
+        if (n >= 1) return; // one automatic retry per user message
+        retries.set(key, n + 1);
+        toastr.info('ตอบไม่ครบ กำลังลองใหม่…');
+        regenerate();
+    }
+
     // ---------- header + typing indicator ----------
 
     let header = null;
@@ -309,10 +427,19 @@
             header = document.createElement('div');
             header.id = 'cb-header';
             header.innerHTML =
-                '<div class="cb-avatar"><span></span><img alt=""></div>' +
-                '<div class="cb-hmeta"><div class="cb-hname"></div>' +
-                '<div class="cb-hstatus"><i class="cb-dot"></i><span>ออนไลน์</span></div></div>';
+                '<div class="cb-avwrap"><div class="cb-avatar"><span></span><img alt=""></div><i class="cb-dot"></i></div>' +
+                '<div class="cb-hmeta"><div class="cb-hname"></div><div class="cb-hstatus"><span>ออนไลน์</span></div></div>' +
+                '<div class="cb-hact">' +
+                '<button type="button" class="cb-hbtn" data-act="regen" title="สร้างคำตอบใหม่"><i class="fa-solid fa-rotate-right"></i></button>' +
+                '<button type="button" class="cb-hbtn" data-act="menu" title="เมนู"><i class="fa-solid fa-ellipsis-vertical"></i></button>' +
+                '</div>';
             header.querySelector('img').addEventListener('error', (e) => { e.target.style.display = 'none'; });
+            header.addEventListener('click', (e) => {
+                const b = e.target.closest('.cb-hbtn');
+                if (!b) return;
+                if (b.dataset.act === 'regen') regenerate();
+                else document.getElementById('options_button')?.click();
+            });
         }
         if (!header.isConnected) chat.prepend(header);
     }
@@ -438,12 +565,13 @@
       <label class="checkbox_label"><input type="checkbox" id="cb_enabled"><span>เปิดใช้งาน</span></label>
       <label class="checkbox_label"><input type="checkbox" id="cb_appui"><span>หน้าตาแอปแชท (ซ้าย/ขวา + แถบชื่อ)</span></label>
       <label class="checkbox_label"><input type="checkbox" id="cb_trim"><span>ประหยัดโทเค่น: ไม่ส่งส่วนคิดของข้อความเก่า</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="cb_retry"><span>ตอบไม่ครบ → ลองใหม่อัตโนมัติ 1 ครั้ง</span></label>
       <div class="cb-row">
         <span>สีบับเบิ้ลของฉัน</span>
         <input type="color" id="cb_color">
       </div>
       <div class="cb-row">
-        <span>จำนวนบับเบิ้ลต่อครั้ง</span>
+        <span>จำนวนบับเบิ้ล (สุ่มทุกครั้ง)</span>
         <input type="number" id="cb_min" class="text_pole" min="1" max="20">
         <span>ถึง</span>
         <input type="number" id="cb_max" class="text_pole" min="1" max="20">
@@ -455,7 +583,7 @@
         <input type="text" id="cb_tags" class="text_pole">
         <div class="cb-row"><span>tag ที่ครอบคำตอบจริง (เว้นว่าง = ไม่ใช้)</span></div>
         <input type="text" id="cb_reply" class="text_pole">
-        <div class="cb-row"><b>พรอมต์ที่ส่งให้ AI</b></div>
+        <div class="cb-row"><b>พรอมต์ที่ส่งให้ AI</b> <small>ใช้ {{n}} = จำนวนบับเบิ้ลรอบนี้, {{style}} = สไตล์สุ่ม</small></div>
         <textarea id="cb_prompt" class="text_pole"></textarea>
         <div class="cb-row"><input type="button" id="cb_reset" class="menu_button" value="รีเซ็ตพรอมต์"></div>
       </details>
@@ -488,6 +616,11 @@
             save();
         });
 
+        $('#cb_retry').prop('checked', s.autoRetry).on('change', function () {
+            s.autoRetry = this.checked;
+            save();
+        });
+
         $('#cb_color').val(s.meColor).on('input', function () {
             s.meColor = this.value;
             save();
@@ -505,6 +638,7 @@
             $('#cb_min').val(s.minBubbles);
             $('#cb_max').val(s.maxBubbles);
             save();
+            rollTurn();
             applyPrompt();
         });
 
@@ -514,6 +648,7 @@
             $('#cb_min').val(s.minBubbles);
             $('#cb_max').val(s.maxBubbles);
             save();
+            rollTurn();
             applyPrompt();
         });
 
@@ -557,6 +692,7 @@
 
         buildSettings();
         applyUI();
+        rollTurn();
         applyPrompt();
         ensureHeader();
         updateHeader();
@@ -572,21 +708,26 @@
             generating = true;
             genStart = Date.now();
             animUntil = Infinity;
+            rollTurn(); // new random bubble count for this reply
+            applyPrompt();
             updateTyping();
         });
 
-        const ended = () => {
+        const ended = (stopped) => {
+            const was = generating;
             generating = false;
             animUntil = Date.now() + 1500;
             rescan();
             updateTyping();
+            if (was && !stopped) setTimeout(checkReply, 600);
         };
-        on('GENERATION_ENDED', ended);
-        on('GENERATION_STOPPED', ended);
+        on('GENERATION_ENDED', () => ended(false));
+        on('GENERATION_STOPPED', () => ended(true));
 
         on('CHAT_COMPLETION_PROMPT_READY', onPromptReady);
 
         on('CHAT_CHANGED', () => {
+            retries.clear();
             updateHeader();
             setTimeout(rescan, 50);
         });
