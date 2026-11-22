@@ -1,0 +1,11 @@
+{
+    "display_name": "Chat Bubbles",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "-",
+    "version": "0.2.0",
+    "homePage": ""
+}

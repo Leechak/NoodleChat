@@ -1,0 +1,330 @@
+/* Chat Bubbles v0.2.0 */
+
+:root {
+    --cb-me: #3b82f6;
+    --cb-me-fg: #fff;
+    --cb-bot: rgba(127, 127, 127, 0.22);
+}
+
+/* ---------- bubbles ---------- */
+
+.cb-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    margin: 1px 0;
+}
+
+.cb-wrap.cb-me {
+    align-items: flex-end;
+}
+
+.cb-bubble {
+    width: fit-content;
+    max-width: 82%;
+    padding: 8px 13px;
+    border-radius: 18px;
+    background: var(--cb-bot);
+    line-height: 1.4;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.cb-bubble p {
+    margin: 0;
+}
+
+.cb-bubble p + p {
+    margin-top: 0.4em;
+}
+
+.cb-bubble em {
+    opacity: 0.85;
+}
+
+/* bot tail: grouped bubbles on the left */
+.cb-wrap:not(.cb-me) .cb-bubble:not(:first-child) {
+    border-top-left-radius: 6px;
+}
+.cb-wrap:not(.cb-me) .cb-bubble:not(:last-child) {
+    border-bottom-left-radius: 6px;
+}
+.cb-wrap:not(.cb-me) .cb-bubble:last-child {
+    border-bottom-left-radius: 5px;
+}
+
+/* me: right side, accent colour */
+.cb-wrap.cb-me .cb-bubble {
+    background: var(--cb-me);
+    color: var(--cb-me-fg);
+    white-space: normal;
+    border-bottom-right-radius: 5px;
+}
+.cb-wrap.cb-me .cb-bubble a {
+    color: inherit;
+}
+
+.cb-time {
+    font-size: 0.68em;
+    opacity: 0.5;
+    margin: 1px 6px 0;
+}
+
+/* typing dots */
+.cb-typing {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 12px 14px;
+}
+.cb-typing i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.3;
+    animation: cb-blink 1.2s infinite ease-in-out;
+}
+.cb-typing i:nth-child(2) {
+    animation-delay: 0.2s;
+}
+.cb-typing i:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes cb-blink {
+    0%, 60%, 100% {
+        opacity: 0.3;
+        transform: translateY(0);
+    }
+    30% {
+        opacity: 0.9;
+        transform: translateY(-3px);
+    }
+}
+
+/* new bubbles pop in */
+.cb-bubble.cb-new {
+    opacity: 0;
+    animation: cb-pop 0.28s ease-out forwards;
+}
+
+@keyframes cb-pop {
+    from {
+        opacity: 0;
+        transform: translateY(8px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cb-bubble.cb-new {
+        animation: none;
+        opacity: 1;
+    }
+    .cb-typing i {
+        animation: none;
+        opacity: 0.6;
+    }
+}
+
+.cb-float {
+    padding: 1px 12px;
+}
+
+/* ---------- chat-app layout ---------- */
+
+#cb-header {
+    display: none;
+}
+
+body.cb-app #cb-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding: 9px 14px;
+    margin: 0 0 6px;
+    background: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.92));
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(127, 127, 127, 0.22);
+}
+
+#cb-header .cb-avatar {
+    position: relative;
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--cb-me), #8b5cf6);
+    color: #fff;
+    font-weight: 600;
+}
+
+#cb-header .cb-avatar img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+#cb-header .cb-hmeta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+#cb-header .cb-hname {
+    font-weight: 600;
+    font-size: 1.02em;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#cb-header .cb-hstatus {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.74em;
+    opacity: 0.7;
+}
+
+#cb-header .cb-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22c55e;
+}
+
+#cb-header.cb-is-typing .cb-dot {
+    animation: cb-blink 1.2s infinite ease-in-out;
+}
+
+/* strip ST's message chrome */
+body.cb-app #chat .mes {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    margin: 2px 0 !important;
+    padding: 1px 12px !important;
+}
+
+body.cb-app #chat .mes .mesAvatarWrapper,
+body.cb-app #chat .mes .name_text,
+body.cb-app #chat .mes .timestamp,
+body.cb-app #chat .mes .mesIDDisplay,
+body.cb-app #chat .mes .tokenCounterDisplay,
+body.cb-app #chat .mes .mes_timer,
+body.cb-app #chat .mes .mes_reasoning_details {
+    display: none !important;
+}
+
+body.cb-app #chat .mes .mes_block {
+    position: relative;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+body.cb-app #chat .mes .ch_name {
+    height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+}
+
+body.cb-app #chat .mes .mes_text {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* plain (unconverted) bot text still looks like a bubble */
+body.cb-app #chat .mes:not([is_user="true"]):not([is_system="true"]) .mes_text:not(:has(.cb-wrap)) {
+    width: fit-content;
+    max-width: 82%;
+    padding: 8px 13px !important;
+    border-radius: 18px;
+    background: var(--cb-bot);
+}
+
+body.cb-app #chat .mes[is_system="true"] .mes_text {
+    text-align: center;
+    font-size: 0.8em;
+    opacity: 0.65;
+}
+
+/* message tools: hover (desktop) or tap (touch) */
+body.cb-app #chat .mes .mes_buttons {
+    position: absolute !important;
+    top: -26px;
+    left: 4px;
+    z-index: 15;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.95));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+}
+
+body.cb-app #chat .mes[is_user="true"] .mes_buttons {
+    left: auto;
+    right: 4px;
+}
+
+body.cb-app #chat .mes:hover .mes_buttons,
+body.cb-app #chat .mes.cb-tools .mes_buttons {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ---------- settings panel ---------- */
+
+.cb-settings textarea {
+    width: 100%;
+    min-height: 140px;
+    font-size: 0.85em;
+}
+
+.cb-settings input[type="text"] {
+    width: 100%;
+}
+
+.cb-settings .cb-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+    flex-wrap: wrap;
+}
+
+.cb-settings input[type="number"] {
+    width: 64px;
+}
+
+.cb-settings .cb-adv {
+    margin-top: 8px;
+}
+
+.cb-settings .cb-adv summary {
+    cursor: pointer;
+    opacity: 0.8;
+    margin-bottom: 4px;
+}
